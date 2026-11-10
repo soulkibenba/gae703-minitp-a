@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carte de santé publique</title>
+<!--
+  GAE703 · Gabarit Leaflet « Cartographier et partager des données de santé » · version 2 (séance 8)
+  ------------------------------------------------------------------------------------------------
+  Nouveautés de la version 2 :
+    · fond de carte du gouvernement du Québec (sans clé d'API), fond Esri gris pâle en secours ;
+    · classification par seuils naturels (Jenks) ou par seuils choisis à la main ;
+    · repérage des taux instables (petites populations) ;
+    · couche de superposition facultative (p. ex. îlots de chaleur).
+  Pour une première carte, modifiez SEULEMENT le bloc CONFIG du script (plus bas).
+  Placez ce fichier (index.html) dans le même dossier que vos fichiers GeoJSON (WGS84).
+  Test local : extension Live Server de VS Code, ou bouton « Charger un GeoJSON ».
+  Publication : GitHub Pages (Settings > Pages > Deploy from a branch).
+-->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --fond: #f6f7f9;
+    --panneau: #ffffff;
+    --texte: #1d2433;
+    --texte-doux: #5a6475;
+    --bordure: #d9dde4;
+    --accent: #1f5f8b;
+    --ombre: 0 2px 10px rgba(0, 0, 0, .12);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--texte);
+    background: var(--fond);
+  }
+  #carte { position: absolute; inset: 0; background: #dfe6ec; }
+
+  .panneau {
+    background: var(--panneau);
+    border: 1px solid var(--bordure);
+    border-radius: 8px;
+    box-shadow: var(--ombre);
+    padding: 12px 14px;
+  }
+  #entete {
+    position: absolute; top: 12px; left: 56px; z-index: 1000;
+    max-width: min(420px, calc(100% - 72px));
+  }
+  #entete h1 { font-size: 1.1rem; margin: 0 0 4px; line-height: 1.25; }
+  #entete p { margin: 0; font-size: .85rem; color: var(--texte-doux); }
+  #entete details { margin-top: 8px; font-size: .8rem; color: var(--texte-doux); }
+  #entete details p { margin-top: 6px; }
+  #entete summary { cursor: pointer; color: var(--accent); }
+
+  .legende { font-size: .8rem; line-height: 1.35; min-width: 170px; }
+  .legende h2 { font-size: .85rem; margin: 0 0 2px; }
+  .legende .unite { color: var(--texte-doux); margin-bottom: 6px; }
+  .legende .ligne { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
+  .legende .case { width: 18px; height: 14px; border: 1px solid rgba(0,0,0,.25); flex: none; }
+  .legende .case.instable { border: 2px dashed #1d2433; background: transparent; }
+  .legende .case.superposition { background: transparent; }
+  .legende .point { width: 10px; height: 10px; border-radius: 50%; margin: 0 4px; flex: none; }
+  .legende .methode { margin-top: 6px; color: var(--texte-doux); }
+
+  #chargeur {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    z-index: 1100; max-width: min(440px, calc(100% - 32px)); display: none;
+  }
+  #chargeur h2 { font-size: 1rem; margin: 0 0 6px; }
+  #chargeur p { font-size: .85rem; margin: 0 0 10px; color: var(--texte-doux); }
+  #chargeur label { display: block; font-size: .85rem; margin: 8px 0 2px; font-weight: 600; }
+  #chargeur input { font-size: .85rem; width: 100%; }
+  #chargeur button { margin-top: 12px; font-size: .85rem; }
+
+  .leaflet-popup-content { font-size: .85rem; }
+  .leaflet-popup-content h3 { font-size: .95rem; margin: 0 0 6px; }
+  .leaflet-popup-content table { border-collapse: collapse; }
+  .leaflet-popup-content td { padding: 2px 8px 2px 0; vertical-align: top; }
+  .leaflet-popup-content td:last-child { font-weight: 600; text-align: right; }
+  .leaflet-popup-content .avis { margin-top: 6px; color: #8a4b00; font-size: .8rem; }
+
+  @media (max-width: 600px) {
+    #entete { left: 12px; top: 64px; max-width: calc(100% - 24px); }
+    #entete h1 { font-size: 1rem; }
+    .legende { min-width: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="carte" role="region" aria-label="Carte interactive"></div>
+
+<div id="entete" class="panneau">
+  <h1 id="titre"></h1>
+  <p id="sous-titre"></p>
+  <details>
+    <summary>Sources et note méthodologique</summary>
+    <p id="note"></p>
+    <p id="source"></p>
+  </details>
+</div>
+
+<div id="chargeur" class="panneau" role="dialog" aria-labelledby="chargeur-titre">
+  <h2 id="chargeur-titre">Charger un GeoJSON</h2>
+  <p>Les fichiers n'ont pas pu être lus automatiquement (ouverture locale sans serveur, ou nom de fichier différent de celui du bloc CONFIG). Choisissez-les sur votre ordinateur.</p>
+  <label for="fichier-polygones">Polygones (obligatoire)</label>
+  <input type="file" id="fichier-polygones" accept=".geojson,.json">
+  <label for="fichier-points">Points (facultatif)</label>
+  <input type="file" id="fichier-points" accept=".geojson,.json">
+  <label for="fichier-superposition">Superposition (facultatif)</label>
+  <input type="file" id="fichier-superposition" accept=".geojson,.json">
+  <button type="button" id="fermer-chargeur">Fermer</button>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* =====================================================================
+   CONFIG · À MODIFIER
+   ===================================================================== */
+const CONFIG = {
+  TITRE: "Les lieux de fraîcheur ne suivent pas la population âgée : 26 secteurs sur 61 n'en ont aucun",
+  SOUS_TITRE: "Nombre de lieux publics climatisés pour 10 000 personnes de 65 ans et plus, par secteur (62 secteurs), région fictive de Bellerive, 2026. Taux régional : 15,1.",
+
+  // Fichiers placés dans le même dossier que ce fichier HTML (GeoJSON en WGS84)
+  FICHIER_POLYGONES: "secteurs_taux.geojson",
+  FICHIER_POINTS: "lieux_fraicheur.geojson",        // "" si aucune couche de points
+  FICHIER_SUPERPOSITION: "ilots_chaleur.geojson",   // "" si aucune superposition
+
+  // Champs des polygones
+  CHAMP_NOM: "NOM_SECT",          // nom affiché en titre de la fenêtre contextuelle
+  CHAMP_VALEUR: "TX_LIEUX",       // champ cartographié (numérique)
+  LIBELLE_VALEUR: "Lieux de fraîcheur",
+  UNITE: "pour 10 000 personnes de 65 ans et plus",
+  DECIMALES: 1,
+
+  // Classification
+  NB_CLASSES: 5,                  // 3 à 7
+  METHODE: "manuelle",            // "quantiles", "intervalles", "seuils_naturels" ou "manuelle"
+  // 0,0001 isole les secteurs sans aucun lieu ; 15 ≈ taux régional (15,1) ; 30 et 60 = 2 et 4 fois ce taux
+  BORNES_MANUELLES: [0, 0.0001, 15, 30, 60, 260],   // utilisées seulement si METHODE vaut "manuelle" (min ... max)
+  // Étiquettes de légende (une par classe, même ordre) ; [] pour les étiquettes automatiques
+  LIBELLES_CLASSES: ["0 (aucun lieu)", "0,1 à 15 (sous le taux régional)", "15,1 à 30", "30,1 à 60", "60,1 et plus"],
+  LIBELLE_METHODE: "seuils choisis : 0, taux régional (15), 30, 60",
+  // Palette séquentielle lisible par les personnes daltoniennes (ColorBrewer PuBu)
+  COULEURS: ["#f1eef6", "#d0d1e6", "#a6bddb", "#74a9cf", "#2b8cbe", "#045a8d", "#023858"],
+  COULEUR_SANS_DONNEE: "#cccccc",
+
+  // Taux instables : contour pointillé quand l'effectif du dénominateur est sous le seuil
+  CHAMP_EFFECTIF: "POP_65P",      // "" pour désactiver
+  SEUIL_INSTABLE: 200,
+
+  // Fenêtre contextuelle des polygones : champ, libellé, nombre de décimales
+  CHAMPS_POPUP: [
+    { champ: "N_LIEUX",  libelle: "Lieux de fraîcheur",             decimales: 0 },
+    { champ: "POP_65P",  libelle: "Population de 65 ans et plus",   decimales: 0 },
+    { champ: "TX_LIEUX", libelle: "Taux pour 10 000",               decimales: 1 }
+  ],
+
+  // Points
+  CHAMP_NOM_POINT: "NOM",
+  LIBELLE_POINTS: "Lieu de fraîcheur",
+  COULEUR_POINTS: "#d95f02",
+
+  // Superposition (contour seulement, pour garder la choroplèthe lisible)
+  LIBELLE_SUPERPOSITION: "Îlot de chaleur",
+  COULEUR_SUPERPOSITION: "#b2182b",
+
+  // Textes d'accompagnement (obligatoires pour un partage responsable)
+  SOURCE: "Sources : données fictives produites pour le cours GAE703 (Université de Sherbrooke), 2026, superposées au fond de carte de la région de Saint-Jérôme pour l'affichage seulement.",
+  NOTE: "Taux = lieux publics climatisés du secteur ÷ population de 65 ans et plus × 10 000. Contour pointillé : moins de 200 personnes de 65 ans et plus (16 secteurs), taux instable, car un seul lieu suffit à donner un taux très élevé. Gris : parc régional inhabité, sans taux. Données nettoyées : un doublon retiré et un lieu hors territoire exclu (44 lieux sur 46). Chaque lieu compte pour un, quelle que soit sa capacité.",
+  AUTEUR: "Souleymane Ba, GAE703, Université de Sherbrooke, 10 novembre 2026",
+
+  // Vue initiale (recalée automatiquement sur les polygones)
+  CENTRE: [45.83, -74.05],
+  ZOOM: 10
+};
+
+/* =====================================================================
+   CODE · à modifier ensuite, une demande à la fois (IA générative niveau 3)
+   ===================================================================== */
+const fmt = (v, d) =>
+  (v === null || v === undefined || v === "" || isNaN(Number(v)))
+    ? "n. d."
+    : Number(v).toLocaleString("fr-CA", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+const echapper = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Seuils naturels de Jenks (algorithme de Fisher) : retourne n+1 bornes
+function bornesJenks(v, n) {
+  const m = v.length;
+  if (m <= n) return [...new Set(v)];
+  const lim = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  const vari = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(Infinity));
+  for (let j = 1; j <= n; j++) { lim[1][j] = 1; vari[1][j] = 0; }
+  for (let l = 2; l <= m; l++) {
+    let s1 = 0, s2 = 0, w = 0, var_ = 0;
+    for (let k = 1; k <= l; k++) {
+      const i3 = l - k + 1, val = v[i3 - 1];
+      s2 += val * val; s1 += val; w += 1;
+      var_ = s2 - (s1 * s1) / w;
+      const i4 = i3 - 1;
+      if (i4 !== 0) {
+        for (let j = 2; j <= n; j++) {
+          if (vari[l][j] >= var_ + vari[i4][j - 1]) {
+            lim[l][j] = i3; vari[l][j] = var_ + vari[i4][j - 1];
+          }
+        }
+      }
+    }
+    lim[l][1] = 1; vari[l][1] = var_;
+  }
+  const bornes = new Array(n + 1);
+  bornes[n] = v[m - 1]; bornes[0] = v[0];
+  let k = m;
+  for (let j = n; j >= 2; j--) { const id = lim[k][j] - 2; bornes[j - 1] = v[id]; k = lim[k][j] - 1; }
+  return bornes;
+}
+
+// Bornes de classes : retourne n+1 bornes (min ... max)
+function calculerBornes(valeurs, n, methode) {
+  const v = valeurs.filter(x => Number.isFinite(x)).sort((a, b) => a - b);
+  if (v.length === 0) return [];
+  const min = v[0], max = v[v.length - 1];
+  if (min === max) return [min, max];
+  let bornes;
+  if (methode === "manuelle") {
+    bornes = CONFIG.BORNES_MANUELLES.slice();
+    if (bornes[0] > min) bornes.unshift(min);
+    if (bornes[bornes.length - 1] < max) bornes.push(max);
+  } else if (methode === "seuils_naturels") {
+    bornes = bornesJenks(v, n);
+  } else {
+    bornes = [min];
+    for (let i = 1; i < n; i++) {
+      if (methode === "intervalles") {
+        bornes.push(min + (max - min) * i / n);
+      } else {
+        const pos = (v.length - 1) * i / n;
+        const bas = Math.floor(pos), haut = Math.ceil(pos);
+        bornes.push(v[bas] + (v[haut] - v[bas]) * (pos - bas));
+      }
+    }
+    bornes.push(max);
+  }
+  // Retire les doublons (fréquents avec les quantiles quand plusieurs valeurs valent 0)
+  return bornes.filter((b, i) => i === 0 || b > bornes[i - 1]);
+}
+
+function couleursPour(nbClasses) {
+  // Échantillonne la palette pour obtenir nbClasses couleurs réparties du pâle au foncé
+  const p = CONFIG.COULEURS;
+  if (nbClasses <= 1) return [p[Math.floor(p.length / 2)]];
+  return Array.from({ length: nbClasses }, (_, i) =>
+    p[Math.round(i * (p.length - 1) / (nbClasses - 1))]);
+}
+
+// Valeur numérique ; null, vide ou texte non numérique donnent NaN (« donnée non disponible »)
+const num = x => (x === null || x === undefined || x === "") ? NaN : Number(x);
+
+function indiceClasse(valeur, bornes) {
+  if (!Number.isFinite(valeur) || bornes.length < 2) return -1;
+  for (let i = 1; i < bornes.length; i++) if (valeur <= bornes[i]) return i - 1;
+  return bornes.length - 2;
+}
+
+const estInstable = p => {
+  if (!CONFIG.CHAMP_EFFECTIF) return false;
+  const e = num(p?.[CONFIG.CHAMP_EFFECTIF]);
+  return Number.isFinite(e) && e > 0 && e < CONFIG.SEUIL_INSTABLE;
+};
+
+const NOMS_METHODES = { quantiles: "quantiles", intervalles: "intervalles égaux", seuils_naturels: "seuils naturels (Jenks)", manuelle: "seuils choisis" };
+
+// ---------------------------------------------------------------------
+document.getElementById("titre").textContent = CONFIG.TITRE;
+document.getElementById("sous-titre").textContent = CONFIG.SOUS_TITRE;
+document.getElementById("note").textContent = CONFIG.NOTE;
+document.getElementById("source").textContent = CONFIG.SOURCE + " Réalisation : " + CONFIG.AUTEUR + ".";
+document.title = CONFIG.TITRE;
+
+const carte = L.map("carte", { zoomControl: true }).setView(CONFIG.CENTRE, CONFIG.ZOOM);
+
+const fonds = {
+  // Service TMS du gouvernement du Québec : l'axe des y est inversé, d'où {-y}. Aucune clé d'API.
+  "Carte du gouvernement du Québec": L.tileLayer(
+    "https://geoegl.msp.gouv.qc.ca/carto/tms/1.0.0/carte_gouv_qc_public@EPSG_3857/{z}/{x}/{-y}.png",
+    { maxZoom: 19, attribution: "Fond : © Gouvernement du Québec" }),
+  "Gris pâle (Esri)": L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 16, attribution: "Fond : Esri, HERE, Garmin, © contributeurs OpenStreetMap" })
+};
+fonds["Carte du gouvernement du Québec"].addTo(carte);
+
+const controleCouches = L.control.layers(fonds, {}, { collapsed: true }).addTo(carte);
+let legende = null;
+
+function afficherPolygones(geojson) {
+  const valeurs = geojson.features.map(f => num(f.properties?.[CONFIG.CHAMP_VALEUR]));
+  const bornes = calculerBornes(valeurs, CONFIG.NB_CLASSES, CONFIG.METHODE);
+  const couleurs = couleursPour(Math.max(bornes.length - 1, 1));
+  const unInstable = geojson.features.some(f => estInstable(f.properties));
+
+  const style = f => {
+    const i = indiceClasse(num(f.properties?.[CONFIG.CHAMP_VALEUR]), bornes);
+    const instable = estInstable(f.properties);
+    return {
+      fillColor: i < 0 ? CONFIG.COULEUR_SANS_DONNEE : couleurs[i],
+      fillOpacity: .8,
+      color: instable ? "#1d2433" : "#ffffff",
+      weight: instable ? 1.6 : .8,
+      dashArray: instable ? "4 4" : null
+    };
+  };
+
+  const couche = L.geoJSON(geojson, {
+    style,
+    onEachFeature: (f, lyr) => {
+      const p = f.properties || {};
+      const lignes = CONFIG.CHAMPS_POPUP.map(c =>
+        `<tr><td>${echapper(c.libelle)}</td><td>${fmt(p[c.champ], c.decimales)}</td></tr>`).join("");
+      const avis = estInstable(p)
+        ? `<div class="avis">Taux instable : moins de ${fmt(CONFIG.SEUIL_INSTABLE, 0)} personnes au dénominateur.</div>` : "";
+      lyr.bindPopup(`<h3>${echapper(p[CONFIG.CHAMP_NOM] ?? "Sans nom")}</h3><table>${lignes}</table>${avis}`);
+      lyr.on({
+        mouseover: e => e.target.setStyle({ weight: 2.5, color: "#1d2433" }),
+        mouseout: e => couche.resetStyle(e.target)
+      });
+    }
+  }).addTo(carte);
+
+  controleCouches.addOverlay(couche, CONFIG.LIBELLE_VALEUR);
+  // maxZoom : évite un zoom maximal si la carte est encore sans taille au chargement
+  if (couche.getBounds().isValid()) carte.fitBounds(couche.getBounds(), { padding: [20, 20], maxZoom: 12 });
+  ajouterLegende(bornes, couleurs, valeurs.some(v => !Number.isFinite(v)), unInstable);
+}
+
+function afficherPoints(geojson) {
+  const couche = L.geoJSON(geojson, {
+    pointToLayer: (f, latlng) => L.circleMarker(latlng, {
+      radius: 4, color: "#ffffff", weight: 1,
+      fillColor: CONFIG.COULEUR_POINTS, fillOpacity: .9
+    }),
+    onEachFeature: (f, lyr) =>
+      lyr.bindPopup(`<h3>${echapper(f.properties?.[CONFIG.CHAMP_NOM_POINT] ?? "Lieu")}</h3>`)
+  }).addTo(carte);
+  controleCouches.addOverlay(couche, CONFIG.LIBELLE_POINTS);
+  if (legende) legende.ajouterLigne("ligne-points",
+    `<span class="point" style="background:${CONFIG.COULEUR_POINTS}"></span>${echapper(CONFIG.LIBELLE_POINTS)}`);
+}
+
+function afficherSuperposition(geojson) {
+  const couche = L.geoJSON(geojson, {
+    interactive: false,
+    style: { color: CONFIG.COULEUR_SUPERPOSITION, weight: 2, fill: false }
+  }).addTo(carte);
+  controleCouches.addOverlay(couche, CONFIG.LIBELLE_SUPERPOSITION);
+  if (legende) legende.ajouterLigne("ligne-superposition",
+    `<span class="case superposition" style="border:2px solid ${CONFIG.COULEUR_SUPERPOSITION}"></span>${echapper(CONFIG.LIBELLE_SUPERPOSITION)}`);
+}
+
+function ajouterLegende(bornes, couleurs, sansDonnee, unInstable) {
+  if (legende) carte.removeControl(legende);
+  legende = L.control({ position: "bottomright" });
+  let conteneur;
+  legende.onAdd = () => {
+    conteneur = L.DomUtil.create("div", "panneau legende");
+    let html = `<h2>${echapper(CONFIG.LIBELLE_VALEUR)}</h2><div class="unite">${echapper(CONFIG.UNITE)}</div>`;
+    for (let i = 0; i < bornes.length - 1; i++) {
+      const etiquette = CONFIG.LIBELLES_CLASSES?.[i]
+        ? echapper(CONFIG.LIBELLES_CLASSES[i])
+        : `${fmt(bornes[i], CONFIG.DECIMALES)} à ${fmt(bornes[i + 1], CONFIG.DECIMALES)}`;
+      html += `<div class="ligne"><span class="case" style="background:${couleurs[i]}"></span>${etiquette}</div>`;
+    }
+    if (sansDonnee) {
+      html += `<div class="ligne"><span class="case" style="background:${CONFIG.COULEUR_SANS_DONNEE}"></span>Donnée non disponible</div>`;
+    }
+    if (unInstable) {
+      html += `<div class="ligne"><span class="case instable"></span>Taux instable</div>`;
+    }
+    html += `<div class="methode">Classes : ${echapper(CONFIG.LIBELLE_METHODE || (NOMS_METHODES[CONFIG.METHODE] ?? CONFIG.METHODE))}</div>`;
+    conteneur.innerHTML = html;
+    L.DomEvent.disableClickPropagation(conteneur);
+    return conteneur;
+  };
+  legende.ajouterLigne = (classe, contenu) => {
+    if (!conteneur || conteneur.querySelector("." + classe)) return;
+    const d = document.createElement("div");
+    d.className = "ligne " + classe;
+    d.innerHTML = contenu;
+    conteneur.insertBefore(d, conteneur.querySelector(".methode"));
+  };
+  legende.addTo(carte);
+}
+
+// ---------------------------------------------------------------------
+// Chargement : fetch (serveur ou GitHub Pages), sinon sélection manuelle des fichiers
+async function lireUrl(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} : HTTP ${r.status}`);
+  return r.json();
+}
+
+function lireFichier(input) {
+  return new Promise((ok, echec) => {
+    const f = input.files[0];
+    if (!f) return echec(new Error("Aucun fichier"));
+    const lecteur = new FileReader();
+    lecteur.onload = () => { try { ok(JSON.parse(lecteur.result)); } catch (e) { echec(e); } };
+    lecteur.onerror = () => echec(lecteur.error);
+    lecteur.readAsText(f);
+  });
+}
+
+function verifierWGS84(geojson) {
+  // Un GeoJSON en mètres (Lambert) a des coordonnées hors de [-180, 180]
+  const premier = JSON.stringify(geojson.features?.[0]?.geometry?.coordinates ?? []).match(/-?\d+(\.\d+)?/);
+  if (premier && Math.abs(Number(premier[0])) > 180) {
+    alert("Les coordonnées semblent en mètres : exportez le GeoJSON en WGS84 (option « Projeter vers WGS_1984 »).");
+  }
+}
+
+function montrerChargeur() {
+  const boite = document.getElementById("chargeur");
+  boite.style.display = "block";
+  const brancher = (id, action) => {
+    document.getElementById(id).onchange = async e => {
+      try { action(await lireFichier(e.target)); }
+      catch (err) { alert("Lecture impossible : " + err.message); }
+    };
+  };
+  brancher("fichier-polygones", g => { verifierWGS84(g); afficherPolygones(g); });
+  brancher("fichier-points", afficherPoints);
+  brancher("fichier-superposition", afficherSuperposition);
+  document.getElementById("fermer-chargeur").onclick = () => { boite.style.display = "none"; };
+}
+
+(async () => {
+  try {
+    const poly = await lireUrl(CONFIG.FICHIER_POLYGONES);
+    verifierWGS84(poly);
+    afficherPolygones(poly);
+    if (CONFIG.FICHIER_SUPERPOSITION) {
+      try { afficherSuperposition(await lireUrl(CONFIG.FICHIER_SUPERPOSITION)); }
+      catch (e) { console.warn("Superposition non chargée :", e.message); }
+    }
+    if (CONFIG.FICHIER_POINTS) {
+      try { afficherPoints(await lireUrl(CONFIG.FICHIER_POINTS)); }
+      catch (e) { console.warn("Couche de points non chargée :", e.message); }
+    }
+  } catch (e) {
+    console.warn("Chargement automatique impossible :", e.message);
+    montrerChargeur();
+  }
+})();
+</script>
+</body>
+</html>
